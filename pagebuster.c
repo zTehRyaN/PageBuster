@@ -1,18 +1,18 @@
-/* 
+/*
  * PageBuster - dump all executable pages of packed processes.
- * 
+ *
  * Copyright (C) 2021  Matteo Giordano
- * 
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License along
  * with this program; if not, write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
@@ -47,7 +47,7 @@ static char *path;
 module_param(path, charp, 0000);
 MODULE_PARM_DESC(path, "Path/Name of the target process");
 
-/* 
+/*
  * Data structure for memory areas tracked.
  *
  * Each entry is a memory page, index by its address
@@ -58,30 +58,30 @@ static LIST_HEAD(marea_list);
 /* Data structure for all the memory areas to be considered */
 extern struct list_head marea_list;
 
-/* 
+/*
  * Structure for a memory area to be tracked.
- * 
+ *
  * Entry of the doubly-linked list.
- * 
+ *
  */
 struct marea {
 
 	/* intrusive list core */
 	struct list_head list;
-	
+
 	/* mprotect/mmap address */
 	unsigned long addr;
-	
+
 	/* mprotect/mmap access flag */
 	unsigned long  prot;
 };
 
 static unsigned long epoch_counter = 0;
 
-/* 
+/*
  * Searches inside the list @marea_list if it exists
  * an entry for the given @addr_given
- * 
+ *
  */
 static struct marea *search_page(unsigned long addr_given, struct list_head marea_list)
 {
@@ -111,9 +111,9 @@ struct marea *new_marea(unsigned long addr, int prot)
 	return new_m;
 }
 
-static void dump_to_file(unsigned long buf, size_t size, loff_t *offset) 
+static void dump_to_file(unsigned long buf, size_t size, loff_t *offset)
 {
-	struct file *dest_file = NULL;	
+	struct file *dest_file = NULL;
 	char file_path[100];
 
 	// Permanent path
@@ -380,7 +380,7 @@ static asmlinkage long fh_sys_mprotect(struct pt_regs *regs)
 
 		if (remainder == 0)
 			n_pages = quotient;
-		else 
+		else
 			n_pages = quotient + 1;
 
 		/* Avoid cohexistence of W^X */
@@ -481,7 +481,7 @@ static asmlinkage long fh_sys_mmap(struct pt_regs *regs)
 
 			intended_permissions = regs->dx;
 			regs->dx &= ~PROT_WRITE;
-			
+
 			ret = real_sys_mmap(regs);
 
 			/* Create an entry for each page allocated by the mmap */
@@ -497,7 +497,7 @@ static asmlinkage long fh_sys_mmap(struct pt_regs *regs)
 						break;
 					}
 				}
-				
+
 				if (!replaced) {
 					struct marea *tmp = new_marea(ret + (i * PAGE_SIZE), intended_permissions);
 					list_add(&tmp->list, &marea_list);
@@ -540,7 +540,7 @@ static asmlinkage long fh_sys_mmap(struct pt_regs *regs)
 		}
 
 	} else {
-		return real_sys_mmap(regs);	
+		return real_sys_mmap(regs);
 	}
 }
 
@@ -556,7 +556,7 @@ static asmlinkage int fh_force_sig_fault(int sig, int code, void __user *addr)
 		page_inducted = search_page(address, marea_list);
 	}
 
-	
+
 	/* Standard SIGSEGV handling */
 	if (page_inducted == NULL) {
 		return real_force_sig_fault(sig, code, addr);
@@ -583,9 +583,9 @@ static asmlinkage int fh_force_sig_fault(int sig, int code, void __user *addr)
 
 		/* Bad jump */
 		} else if (current->thread.error_code & X86_PF_INSTR) {
-			
+
 			new_permissions &= ~PROT_WRITE;
-			
+
 			stac();
 			loff_t offset = 0;
 			loff_t *off_p = &offset;
@@ -621,12 +621,12 @@ static asmlinkage long fh_sys_execve(struct pt_regs *regs)
 		return -EINVAL;
 	}
 
-	/* 
+	/*
 	 * If the path matches the given parameter, then empty the list.
  	 */
 	if (strstr(kernel_filename, path) != NULL) {
 		list_for_each_entry_safe(entry, tmp, &marea_list, list) {
-			list_del(&entry->list);	
+			list_del(&entry->list);
 		}
 	}
 
