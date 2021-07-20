@@ -73,7 +73,10 @@ struct marea {
 	unsigned long addr;
 
 	/* mprotect/mmap access flag */
-	unsigned long  prot;
+	unsigned long prot;
+
+	/* Dump emitted flag */
+	bool dumped;
 };
 
 static unsigned long epoch_counter = 0;
@@ -104,8 +107,9 @@ struct marea *new_marea(unsigned long addr, int prot)
 {
 	struct marea *new_m = (struct marea *) kmalloc(sizeof(struct marea), GFP_KERNEL);
 	if (new_m) {
-		new_m->addr = addr;
-		new_m->prot = prot;
+		new_m->addr   = addr;
+		new_m->prot   = prot;
+		new_m->dumped = false;
 		INIT_LIST_HEAD(&new_m->list);
 	}
 	return new_m;
@@ -117,10 +121,10 @@ static void dump_to_file(unsigned long buf, size_t size, loff_t *offset)
 	char file_path[100];
 
 	// Permanent path
-	//sprintf(file_path, "/lkmc/dump/%lx_%lu", buf, epoch_counter);
+	//sprintf(file_path, "/lkmc/dump/%05lu_%lx", epoch_counter, buf);
 
 	// Temporary path
-	sprintf(file_path, "/tmp/%lx_%lu", buf, epoch_counter);
+	sprintf(file_path, "/tmp/%05lu_%lx", epoch_counter, buf);
 
 	epoch_counter++;
 
@@ -416,6 +420,11 @@ static asmlinkage long fh_sys_mprotect(struct pt_regs *regs)
 				loff_t offset = 0;
 				loff_t *off_p = &offset;
 				dump_to_file(regs->di + (i * PAGE_SIZE), PAGE_SIZE, off_p);
+
+				/* Create the entry and set the dumped flag */
+				struct marea *tmp = new_marea(regs->di + (i * PAGE_SIZE), regs->dx);
+				tmp->dumped = true;
+				list_add(&tmp->list, &marea_list);
 			}
 
 			/* EFLAGS.AC <- 0 */
@@ -428,6 +437,17 @@ static asmlinkage long fh_sys_mprotect(struct pt_regs *regs)
 				tmp = NULL;
 				list_for_each_entry_safe(entry, tmp, &marea_list, list) {
 					if (entry->addr == (regs->di + (i * PAGE_SIZE))) {
+
+						if (entry->dumped) {
+
+							/* Invalidating the existing dump */
+							stac();
+							loff_t offset = 0;
+							loff_t *off_p = &offset;
+							dump_to_file(entry->addr, 0, off_p);
+							clac();
+						}
+
 						list_del(&entry->list);
 						kfree(entry);
 					}
@@ -516,6 +536,11 @@ static asmlinkage long fh_sys_mmap(struct pt_regs *regs)
 				loff_t offset = 0;
 				loff_t *off_p = &offset;
 				dump_to_file(ret + (i * PAGE_SIZE), PAGE_SIZE, off_p);
+
+				/* Create the entry and set the dumped flag */
+				struct marea *tmp = new_marea(ret + (i * PAGE_SIZE), regs->dx);
+				tmp->dumped = true;
+				list_add(&tmp->list, &marea_list);
 			}
 
 			/* EFLAGS.AC <- 0 */
@@ -531,6 +556,17 @@ static asmlinkage long fh_sys_mmap(struct pt_regs *regs)
 				tmp = NULL;
 				list_for_each_entry_safe(entry, tmp, &marea_list, list) {
 					if (entry->addr == (ret + (i * PAGE_SIZE))) {
+
+						if (entry->dumped) {
+
+							/* Invalidating the existing dump */
+							stac();
+							loff_t offset = 0;
+							loff_t *off_p = &offset;
+							dump_to_file(entry->addr, 0, off_p);
+							clac();
+						}
+
 						list_del(&entry->list);
 						kfree(entry);
 					}
@@ -542,6 +578,54 @@ static asmlinkage long fh_sys_mmap(struct pt_regs *regs)
 	} else {
 		return real_sys_mmap(regs);
 	}
+}
+
+/* munmap() hook'd function */
+static asmlinkage long (*real_sys_munmap)(struct pt_regs *regs);
+
+/*
+ *	%rdi	regs->di	unsigned long addr
+ *	%rsi	regs->si	unsigned long len
+ */
+static asmlinkage long fh_sys_munmap(struct pt_regs *regs)
+{
+	int n_pages;
+	size_t quotient, remainder;
+
+	struct marea *entry, *tmp;
+
+	quotient = regs->si / PAGE_SIZE;
+	remainder = regs->si % PAGE_SIZE;
+
+	if (remainder == 0)
+		n_pages = quotient;
+	else
+		n_pages = quotient + 1;
+
+	/* Invalidating dumps */
+	for (int i = 0; i < n_pages; i++) {
+
+		entry = NULL;
+		tmp = NULL;
+		list_for_each_entry_safe(entry, tmp, &marea_list, list) {
+			if (entry->addr == (regs->di + (i * PAGE_SIZE))) {
+				if (entry->dumped) {
+
+					/* Invalidating the existing dump */
+					stac();
+					loff_t offset = 0;
+					loff_t *off_p = &offset;
+					dump_to_file(entry->addr, 0, off_p);
+					clac();
+				}
+
+				list_del(&entry->list);
+				kfree(entry);
+			}
+		}
+	}
+
+	return real_sys_munmap(regs);
 }
 
 static asmlinkage long (*real_force_sig_fault)(int sig, int code, void __user *addr);
@@ -556,13 +640,14 @@ static asmlinkage int fh_force_sig_fault(int sig, int code, void __user *addr)
 		page_inducted = search_page(address, marea_list);
 	}
 
-
 	/* Standard SIGSEGV handling */
 	if (page_inducted == NULL) {
+
 		return real_force_sig_fault(sig, code, addr);
 
 	/* Custom SIGSEGV handling */
 	} else {
+
 		struct pt_regs *regs = kmalloc(sizeof(struct pt_regs), GFP_KERNEL);
 		// Address
 		regs->di = page_inducted->addr;
@@ -573,6 +658,15 @@ static asmlinkage int fh_force_sig_fault(int sig, int code, void __user *addr)
 
 		/* Invalid write attempt */
 		if (current->thread.error_code & X86_PF_WRITE) {
+
+			if (page_inducted->dumped) {
+
+				stac();
+				loff_t offset = 0;
+				loff_t *off_p = &offset;
+				dump_to_file(page_inducted->addr, 0, off_p);
+				clac();
+			}
 
 			new_permissions &= ~PROT_EXEC;
 
@@ -592,11 +686,15 @@ static asmlinkage int fh_force_sig_fault(int sig, int code, void __user *addr)
 			dump_to_file(page_inducted->addr, PAGE_SIZE, off_p);
 			clac();
 
+			/* Set the dumped flag */
+			page_inducted->dumped = true;
+
 			// Protections
 			regs->dx = new_permissions;
 
 			real_sys_mprotect(regs);
 		}
+
 		kfree(regs);
 
 		return 0;
@@ -663,6 +761,7 @@ static struct ftrace_hook demo_hooks[] = {
 	HOOK("sys_mprotect",  fh_sys_mprotect,  &real_sys_mprotect),
 	HOOK("sys_mmap", fh_sys_mmap, &real_sys_mmap),
 	HOOK("sys_execve", fh_sys_execve, &real_sys_execve),
+	HOOK("sys_munmap", fh_sys_munmap, &real_sys_munmap),
 	HOOK_NOSYS("force_sig_fault", fh_force_sig_fault, &real_force_sig_fault),
 };
 
